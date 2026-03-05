@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+bcrypt
+PyJWT
+python-multipart
+ffmpeg-python
+faster-whisper
+pydantic
+email-validator
