@@ -8,6 +8,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 import jwt
 import yt_dlp
 
@@ -34,11 +35,7 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
 
 app = FastAPI(title="Clippify API")
 
-
-# -------------------------
-# CORS (VERY IMPORTANT)
-# -------------------------
-
+# Enable CORS (important for frontend)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,8 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Serve clips publicly
+# Serve clips
 app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 
 
@@ -71,12 +67,14 @@ class YoutubeRequest(BaseModel):
 
 
 def create_token(email: str):
+
     payload = {
         "email": email,
         "exp": int(time.time()) + 86400
     }
 
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
     return token
 
 
@@ -85,14 +83,18 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
 
     try:
+
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
         return payload["email"]
+
     except:
+
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
 # -------------------------
-# ROUTES
+# BASIC ROUTES
 # -------------------------
 
 @app.get("/")
@@ -137,11 +139,12 @@ def login(user: User):
 
 @app.get("/dashboard")
 def dashboard(email: str = Depends(verify_token)):
+
     return {"message": f"Welcome {email}"}
 
 
 # -------------------------
-# YOUTUBE DOWNLOAD
+# DOWNLOAD YOUTUBE VIDEO
 # -------------------------
 
 def download_youtube(url: str):
@@ -160,7 +163,7 @@ def download_youtube(url: str):
 
 
 # -------------------------
-# AUDIO EXTRACTION
+# EXTRACT AUDIO
 # -------------------------
 
 def extract_audio(video_path: str):
@@ -183,24 +186,26 @@ def extract_audio(video_path: str):
 
 
 # -------------------------
-# CLIP GENERATION
+# GENERATE SHORTS CLIPS
 # -------------------------
 
 def generate_clips(video_path: str):
 
     clips = []
 
-    durations = [18, 4, 4, 4, 5]
-    start = 0
+    clip_length = 35
+    max_clips = 5
 
-    for i, d in enumerate(durations):
+    for i in range(max_clips):
+
+        start = i * clip_length
 
         clip_path = f"{CLIPS_DIR}/clip_{i}.mp4"
 
         cmd = [
             "ffmpeg",
             "-ss", str(start),
-            "-t", str(d),
+            "-t", str(clip_length),
             "-i", video_path,
             "-c", "copy",
             clip_path,
@@ -210,8 +215,6 @@ def generate_clips(video_path: str):
         subprocess.run(cmd)
 
         clips.append(f"/clips/clip_{i}.mp4")
-
-        start += d
 
     return clips
 
