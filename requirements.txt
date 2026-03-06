@@ -1,5 +1,5 @@
 fastapi
-uvicorn[standard
+uvicorn[standard]
 bcrypt
 PyJWT
 python-multipart
