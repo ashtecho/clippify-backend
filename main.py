@@ -1,40 +1,86 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
-import json
 import bcrypt
 import jwt
-import datetime
+import json
 import os
-import subprocess
-import shutil
-from faster_whisper import WhisperModel
+from datetime import datetime, timedelta
+from pathlib import Path
 
-app = FastAPI(title="Clippify Auth API")
+app = FastAPI(title="Clippify API")
 
-SECRET_KEY = "clippify_secret_key"
+# =========================
+# CONFIG
+# =========================
+
+SECRET_KEY = "clippify-secret-key"
+ALGORITHM = "HS256"
+
+MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
+
 security = HTTPBearer()
+
+# =========================
+# FOLDERS
+# =========================
 
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("audio", exist_ok=True)
-os.makedirs("transcripts", exist_ok=True)
+os.makedirs("clips", exist_ok=True)
 
-# load whisper model
-model = WhisperModel("small", compute_type="int8")
+# =========================
+# USER MODEL
+# =========================
 
 class User(BaseModel):
     email: EmailStr
     password: str
 
+# =========================
+# USER STORAGE
+# =========================
+
+USERS_FILE = "users.json"
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w") as f:
+            json.dump([], f)
+
+    with open(USERS_FILE, "r") as f:
+        return json.load(f)
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
+
+# =========================
+# TOKEN SYSTEM
+# =========================
+
+def create_token(email: str):
+    payload = {
+        "email": email,
+        "exp": datetime.utcnow() + timedelta(hours=24)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+
     token = credentials.credentials
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
+
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+# =========================
+# ROUTES
+# =========================
+
 @app.get("/")
 def home():
     return {"message": "Welcome to Clippify backend", "docs": "/docs"}
@@ -43,15 +89,18 @@ def home():
 def health():
     return {"status": "healthy"}
 
+# =========================
+# SIGNUP
+# =========================
+
 @app.post("/signup")
 def signup(user: User):
 
-    with open("users.json", "r") as f:
-        users = json.load(f)
+    users = load_users()
 
     for u in users:
         if u["email"] == user.email:
-            raise HTTPException(status_code=400, detail="Email exists")
+            raise HTTPException(status_code=400, detail="User already exists")
 
     hashed = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt())
 
@@ -60,88 +109,89 @@ def signup(user: User):
         "password": hashed.decode()
     })
 
-    with open("users.json", "w") as f:
-        json.dump(users, f)
+    save_users(users)
 
-    return {"message": "User created successfully"}
+    return {"message": "User created securely"}
+
+# =========================
+# LOGIN
+# =========================
 
 @app.post("/login")
 def login(user: User):
 
-    with open("users.json", "r") as f:
-        users = json.load(f)
+    users = load_users()
 
     for u in users:
-
         if u["email"] == user.email:
 
             if bcrypt.checkpw(user.password.encode(), u["password"].encode()):
 
-                payload = {
-                    "email": user.email,
-                    "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-                }
-
-                token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+                token = create_token(user.email)
 
                 return {
                     "message": "Login successful",
                     "access_token": token
                 }
 
-            raise HTTPException(status_code=401, detail="Invalid password")
+            else:
+                raise HTTPException(status_code=401, detail="Invalid password")
 
     raise HTTPException(status_code=404, detail="User not found")
 
+# =========================
+# DASHBOARD
+# =========================
+
 @app.get("/dashboard")
-def dashboard(user=Depends(verify_token)):
-    return {"message": "Welcome", "user": user["email"]}
+def dashboard(payload = Depends(verify_token)):
 
+    return {
+        "message": "Welcome",
+        "user": payload["email"]
+    }
 
-# PROCESS VIDEO PIPELINE
-def process_video(video_path):
-
-    filename = os.path.basename(video_path)
-    audio_path = f"audio/{filename}.wav"
-    transcript_path = f"transcripts/{filename}.txt"
-
-    # extract audio
-    subprocess.run([
-        "ffmpeg",
-        "-y",
-        "-i", video_path,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        audio_path
-    ])
-
-    # transcribe
-    segments, info = model.transcribe(audio_path)
-
-    with open(transcript_path, "w") as f:
-        for segment in segments:
-            line = f"{segment.start:.2f} --> {segment.end:.2f} | {segment.text}\n"
-            f.write(line)
-
+# =========================
+# SAFE VIDEO UPLOAD
+# =========================
 
 @app.post("/upload-video")
 async def upload_video(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    user=Depends(verify_token)
+    payload = Depends(verify_token)
 ):
 
-    video_path = f"uploads/{file.filename}"
+    allowed = [".mp4", ".mov", ".mkv"]
 
-    with open(video_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    if not any(file.filename.endswith(ext) for ext in allowed):
+        raise HTTPException(status_code=400, detail="Unsupported video format")
 
-    background_tasks.add_task(process_video, video_path)
+    filepath = f"uploads/{file.filename}"
+
+    size = 0
+
+    with open(filepath, "wb") as buffer:
+
+        while True:
+
+            chunk = await file.read(1024 * 1024)  # 1MB chunk
+
+            if not chunk:
+                break
+
+            size += len(chunk)
+
+            if size > MAX_VIDEO_SIZE:
+                buffer.close()
+                os.remove(filepath)
+                raise HTTPException(status_code=400, detail="File exceeds 4GB limit")
+
+            buffer.write(chunk)
 
     return {
-        "message": "Upload successful. AI processing started.",
-        "video_saved": video_path,
-        "status": "processing"
+        "message": "Upload successful",
+        "filename": file.filename,
+        "size_mb": round(size / (1024*1024), 2),
+        "saved_to": filepath,
+        "status": "ready for processing"
     }
