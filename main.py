@@ -2,10 +2,12 @@ import os
 import json
 import jwt
 import bcrypt
-import ffmpeg
+import subprocess
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from faster_whisper import WhisperModel
@@ -21,14 +23,12 @@ TOKEN_EXPIRE_HOURS = 24
 UPLOAD_FOLDER = "uploads"
 AUDIO_FOLDER = "audio"
 CLIPS_FOLDER = "clips"
-
 USERS_DB = "users.json"
 
-MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
-
+MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024
 
 # -------------------------
-# CREATE FOLDERS
+# CREATE DIRECTORIES
 # -------------------------
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -41,13 +41,31 @@ os.makedirs(CLIPS_FOLDER, exist_ok=True)
 
 app = FastAPI(title="Clippify API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 security = HTTPBearer()
 
 # -------------------------
-# LOAD WHISPER MODEL
+# WHISPER MODEL
 # -------------------------
 
-model = WhisperModel("tiny", compute_type="int8")
+model = WhisperModel(
+    "tiny",
+    compute_type="int8",
+    cpu_threads=4
+)
+
+# -------------------------
+# THREAD POOL
+# -------------------------
+
+executor = ThreadPoolExecutor(max_workers=4)
 
 # -------------------------
 # USER MODEL
@@ -56,7 +74,6 @@ model = WhisperModel("tiny", compute_type="int8")
 class User(BaseModel):
     email: EmailStr
     password: str
-
 
 # -------------------------
 # DATABASE
@@ -77,9 +94,8 @@ def save_users(users):
     with open(USERS_DB, "w") as f:
         json.dump(users, f)
 
-
 # -------------------------
-# AUTH FUNCTIONS
+# AUTH
 # -------------------------
 
 def create_token(email):
@@ -97,17 +113,14 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
 
     try:
-
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
 
     except:
-
         raise HTTPException(status_code=401, detail="Invalid token")
 
-
 # -------------------------
-# BASIC ROUTES
+# ROUTES
 # -------------------------
 
 @app.get("/")
@@ -184,13 +197,85 @@ def dashboard(payload=Depends(verify_token)):
         "user": payload["email"]
     }
 
+# -------------------------
+# FAST AUDIO EXTRACTION
+# -------------------------
+
+def extract_audio(video_path, audio_path):
+
+    subprocess.run([
+        "ffmpeg",
+        "-i", video_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-y",
+        audio_path
+    ])
+
+# -------------------------
+# CLIP CUTTING (FAST SEEK)
+# -------------------------
+
+def cut_clip(video, start, end, output):
+
+    subprocess.run([
+        "ffmpeg",
+        "-ss", str(start),
+        "-to", str(end),
+        "-i", video,
+        "-c", "copy",
+        "-y",
+        output
+    ])
+
+# -------------------------
+# PROCESS VIDEO
+# -------------------------
+
+def process_video(video_path):
+
+    filename = os.path.basename(video_path)
+
+    audio_path = f"{AUDIO_FOLDER}/{filename}.wav"
+
+    extract_audio(video_path, audio_path)
+
+    segments, info = model.transcribe(audio_path)
+
+    timestamps = []
+
+    for seg in segments:
+
+        if len(seg.text.split()) > 6:
+
+            timestamps.append((seg.start, seg.end))
+
+    clips = []
+
+    for i, (start, end) in enumerate(timestamps[:5]):
+
+        clip_path = f"{CLIPS_FOLDER}/clip_{i}.mp4"
+
+        cut_clip(video_path, start, end, clip_path)
+
+        clips.append(clip_path)
+
+    os.remove(video_path)
+    os.remove(audio_path)
+
+    return clips
 
 # -------------------------
 # VIDEO UPLOAD
 # -------------------------
 
 @app.post("/upload-video")
-async def upload_video(file: UploadFile = File(...), payload=Depends(verify_token)):
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    payload=Depends(verify_token)
+):
 
     video_path = f"{UPLOAD_FOLDER}/{file.filename}"
 
@@ -213,63 +298,8 @@ async def upload_video(file: UploadFile = File(...), payload=Depends(verify_toke
 
             buffer.write(chunk)
 
-    # -------------------------
-    # EXTRACT AUDIO
-    # -------------------------
-
-    audio_path = f"{AUDIO_FOLDER}/{file.filename}.wav"
-
-    ffmpeg.input(video_path).output(
-        audio_path,
-        ac=1,
-        ar="16000"
-    ).run(overwrite_output=True)
-
-    # -------------------------
-    # TRANSCRIBE
-    # -------------------------
-
-    segments, info = model.transcribe(audio_path)
-
-    timestamps = []
-
-    for s in segments:
-
-        timestamps.append({
-            "start": s.start,
-            "end": s.end,
-            "text": s.text
-        })
-
-    # -------------------------
-    # GENERATE CLIPS
-    # -------------------------
-
-    clip_paths = []
-
-    for i, seg in enumerate(timestamps[:5]):
-
-        start = seg["start"]
-        end = seg["end"]
-
-        clip_path = f"{CLIPS_FOLDER}/clip_{i}.mp4"
-
-        ffmpeg.input(video_path, ss=start, to=end).output(
-            clip_path
-        ).run(overwrite_output=True)
-
-        clip_paths.append(clip_path)
-
-    # -------------------------
-    # CLEANUP
-    # -------------------------
-
-    os.remove(video_path)
-    os.remove(audio_path)
+    background_tasks.add_task(process_video, video_path)
 
     return {
-
-        "message": "Processing complete",
-
-        "clips": clip_paths
+        "message": "Upload successful. Processing started."
     }
