@@ -3,10 +3,9 @@ import json
 import jwt
 import bcrypt
 import subprocess
+import yt_dlp
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
-
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -20,18 +19,12 @@ SECRET_KEY = "clippify_secret"
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
 
-UPLOAD_FOLDER = "uploads"
+DOWNLOAD_FOLDER = "downloads"
 AUDIO_FOLDER = "audio"
 CLIPS_FOLDER = "clips"
 USERS_DB = "users.json"
 
-MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024
-
-# -------------------------
-# CREATE DIRECTORIES
-# -------------------------
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(AUDIO_FOLDER, exist_ok=True)
 os.makedirs(CLIPS_FOLDER, exist_ok=True)
 
@@ -52,7 +45,7 @@ app.add_middleware(
 security = HTTPBearer()
 
 # -------------------------
-# WHISPER MODEL
+# WHISPER MODEL (FAST)
 # -------------------------
 
 model = WhisperModel(
@@ -62,18 +55,15 @@ model = WhisperModel(
 )
 
 # -------------------------
-# THREAD POOL
-# -------------------------
-
-executor = ThreadPoolExecutor(max_workers=4)
-
-# -------------------------
-# USER MODEL
+# MODELS
 # -------------------------
 
 class User(BaseModel):
     email: EmailStr
     password: str
+
+class YoutubeRequest(BaseModel):
+    url: str
 
 # -------------------------
 # DATABASE
@@ -132,7 +122,6 @@ def home():
 def health():
     return {"status": "healthy", "time": datetime.utcnow()}
 
-
 # -------------------------
 # SIGNUP
 # -------------------------
@@ -156,7 +145,6 @@ def signup(user: User):
     save_users(users)
 
     return {"message": "User created successfully"}
-
 
 # -------------------------
 # LOGIN
@@ -184,7 +172,6 @@ def login(user: User):
 
     raise HTTPException(status_code=404, detail="User not found")
 
-
 # -------------------------
 # DASHBOARD
 # -------------------------
@@ -198,10 +185,31 @@ def dashboard(payload=Depends(verify_token)):
     }
 
 # -------------------------
-# FAST AUDIO EXTRACTION
+# DOWNLOAD YOUTUBE VIDEO
 # -------------------------
 
-def extract_audio(video_path, audio_path):
+def download_youtube(url):
+
+    filename = f"{DOWNLOAD_FOLDER}/video_{int(datetime.utcnow().timestamp())}.mp4"
+
+    ydl_opts = {
+        "format": "best[ext=mp4]",
+        "outtmpl": filename,
+        "quiet": True
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    return filename
+
+# -------------------------
+# EXTRACT AUDIO
+# -------------------------
+
+def extract_audio(video_path):
+
+    audio_path = f"{AUDIO_FOLDER}/{os.path.basename(video_path)}.wav"
 
     subprocess.run([
         "ffmpeg",
@@ -213,8 +221,10 @@ def extract_audio(video_path, audio_path):
         audio_path
     ])
 
+    return audio_path
+
 # -------------------------
-# CLIP CUTTING (FAST SEEK)
+# CUT CLIPS FAST
 # -------------------------
 
 def cut_clip(video, start, end, output):
@@ -235,11 +245,7 @@ def cut_clip(video, start, end, output):
 
 def process_video(video_path):
 
-    filename = os.path.basename(video_path)
-
-    audio_path = f"{AUDIO_FOLDER}/{filename}.wav"
-
-    extract_audio(video_path, audio_path)
+    audio_path = extract_audio(video_path)
 
     segments, info = model.transcribe(audio_path)
 
@@ -248,7 +254,6 @@ def process_video(video_path):
     for seg in segments:
 
         if len(seg.text.split()) > 6:
-
             timestamps.append((seg.start, seg.end))
 
     clips = []
@@ -267,39 +272,20 @@ def process_video(video_path):
     return clips
 
 # -------------------------
-# VIDEO UPLOAD
+# YOUTUBE PROCESS ENDPOINT
 # -------------------------
 
-@app.post("/upload-video")
-async def upload_video(
+@app.post("/process-youtube")
+def process_youtube(
+    data: YoutubeRequest,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
     payload=Depends(verify_token)
 ):
 
-    video_path = f"{UPLOAD_FOLDER}/{file.filename}"
-
-    size = 0
-
-    with open(video_path, "wb") as buffer:
-
-        while True:
-
-            chunk = await file.read(1024 * 1024)
-
-            if not chunk:
-                break
-
-            size += len(chunk)
-
-            if size > MAX_VIDEO_SIZE:
-                os.remove(video_path)
-                raise HTTPException(status_code=413, detail="File too large")
-
-            buffer.write(chunk)
+    video_path = download_youtube(data.url)
 
     background_tasks.add_task(process_video, video_path)
 
     return {
-        "message": "Upload successful. Processing started."
-    }
+        "message": "Video downloaded. Processing started."
+}
