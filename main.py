@@ -6,7 +6,7 @@ import jwt
 import json
 import os
 from datetime import datetime, timedelta
-from pathlib import Path
+import ffmpeg
 
 app = FastAPI(title="Clippify API")
 
@@ -22,7 +22,7 @@ MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
 security = HTTPBearer()
 
 # =========================
-# FOLDERS
+# CREATE FOLDERS
 # =========================
 
 os.makedirs("uploads", exist_ok=True)
@@ -44,6 +44,7 @@ class User(BaseModel):
 USERS_FILE = "users.json"
 
 def load_users():
+
     if not os.path.exists(USERS_FILE):
         with open(USERS_FILE, "w") as f:
             json.dump([], f)
@@ -52,6 +53,7 @@ def load_users():
         return json.load(f)
 
 def save_users(users):
+
     with open(USERS_FILE, "w") as f:
         json.dump(users, f)
 
@@ -60,10 +62,12 @@ def save_users(users):
 # =========================
 
 def create_token(email: str):
+
     payload = {
         "email": email,
         "exp": datetime.utcnow() + timedelta(hours=24)
     }
+
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -76,6 +80,29 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+# =========================
+# AUDIO EXTRACTION
+# =========================
+
+def extract_audio(video_path):
+
+    filename = os.path.basename(video_path)
+    audio_path = f"audio/{filename}.wav"
+
+    try:
+
+        (
+            ffmpeg
+            .input(video_path)
+            .output(audio_path, ac=1, ar="16000")
+            .run(overwrite_output=True)
+        )
+
+        return audio_path
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =========================
 # ROUTES
@@ -123,6 +150,7 @@ def login(user: User):
     users = load_users()
 
     for u in users:
+
         if u["email"] == user.email:
 
             if bcrypt.checkpw(user.password.encode(), u["password"].encode()):
@@ -152,7 +180,7 @@ def dashboard(payload = Depends(verify_token)):
     }
 
 # =========================
-# SAFE VIDEO UPLOAD
+# VIDEO UPLOAD + AUDIO
 # =========================
 
 @app.post("/upload-video")
@@ -174,7 +202,7 @@ async def upload_video(
 
         while True:
 
-            chunk = await file.read(1024 * 1024)  # 1MB chunk
+            chunk = await file.read(1024 * 1024)
 
             if not chunk:
                 break
@@ -188,10 +216,12 @@ async def upload_video(
 
             buffer.write(chunk)
 
+    # Extract audio
+    audio_file = extract_audio(filepath)
+
     return {
-        "message": "Upload successful",
-        "filename": file.filename,
-        "size_mb": round(size / (1024*1024), 2),
-        "saved_to": filepath,
-        "status": "ready for processing"
+        "message": "Upload successful. Processing started.",
+        "video_saved": filepath,
+        "audio_output": audio_file,
+        "status": "audio extracted"
     }
