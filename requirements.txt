@@ -3,9 +3,8 @@ uvicorn[standard]
 bcrypt
 PyJWT
 python-multipart
-ffmpeg-python
-faster-whisper
 pydantic
 email-validator
+requests
 ffmpeg-python
 faster-whisper
