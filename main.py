@@ -6,9 +6,11 @@ from typing import List
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import jwt
 import yt_dlp
+
 
 # -------------------------
 # CONFIG
@@ -25,14 +27,30 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
+
 # -------------------------
 # APP
 # -------------------------
 
 app = FastAPI(title="Clippify API")
 
+
+# -------------------------
+# CORS (VERY IMPORTANT)
+# -------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # Serve clips publicly
 app.mount("/clips", StaticFiles(directory="clips"), name="clips")
+
 
 # -------------------------
 # AUTH
@@ -42,19 +60,28 @@ security = HTTPBearer()
 
 users_db = {}
 
+
 class User(BaseModel):
     email: str
     password: str
 
+
 class YoutubeRequest(BaseModel):
     url: str
 
+
 def create_token(email: str):
-    payload = {"email": email, "exp": int(time.time()) + 86400}
+    payload = {
+        "email": email,
+        "exp": int(time.time()) + 86400
+    }
+
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     return token
 
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+
     token = credentials.credentials
 
     try:
@@ -62,6 +89,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         return payload["email"]
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
+
 
 # -------------------------
 # ROUTES
@@ -71,9 +99,11 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 def home():
     return {"message": "Clippify backend running"}
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 # -------------------------
 # AUTH ROUTES
@@ -89,6 +119,7 @@ def signup(user: User):
 
     return {"message": "Signup successful"}
 
+
 @app.post("/login")
 def login(user: User):
 
@@ -99,6 +130,7 @@ def login(user: User):
 
     return {"access_token": token}
 
+
 # -------------------------
 # DASHBOARD
 # -------------------------
@@ -106,6 +138,7 @@ def login(user: User):
 @app.get("/dashboard")
 def dashboard(email: str = Depends(verify_token)):
     return {"message": f"Welcome {email}"}
+
 
 # -------------------------
 # YOUTUBE DOWNLOAD
@@ -124,6 +157,7 @@ def download_youtube(url: str):
         ydl.download([url])
 
     return filename
+
 
 # -------------------------
 # AUDIO EXTRACTION
@@ -146,6 +180,7 @@ def extract_audio(video_path: str):
     subprocess.run(cmd)
 
     return audio_path
+
 
 # -------------------------
 # CLIP GENERATION
@@ -174,11 +209,12 @@ def generate_clips(video_path: str):
 
         subprocess.run(cmd)
 
-        clips.append(clip_path)
+        clips.append(f"/clips/clip_{i}.mp4")
 
         start += d
 
     return clips
+
 
 # -------------------------
 # PROCESS YOUTUBE
@@ -189,7 +225,7 @@ def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
 
     video = download_youtube(req.url)
 
-    audio = extract_audio(video)
+    extract_audio(video)
 
     clips = generate_clips(video)
 
@@ -197,6 +233,7 @@ def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
         "message": "Processing completed",
         "clips": clips
     }
+
 
 # -------------------------
 # LIST CLIPS
