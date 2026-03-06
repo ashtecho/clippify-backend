@@ -35,7 +35,7 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
 
 app = FastAPI(title="Clippify API")
 
-# Enable CORS (important for frontend)
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve clips
+# Serve clips publicly
 app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 
 
@@ -83,13 +83,10 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
 
     try:
-
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
         return payload["email"]
 
     except:
-
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
@@ -186,7 +183,7 @@ def extract_audio(video_path: str):
 
 
 # -------------------------
-# GENERATE SHORTS CLIPS
+# GENERATE VERTICAL SHORTS
 # -------------------------
 
 def generate_clips(video_path: str):
@@ -207,7 +204,14 @@ def generate_clips(video_path: str):
             "-ss", str(start),
             "-t", str(clip_length),
             "-i", video_path,
-            "-c", "copy",
+
+            # convert horizontal video to vertical
+            "-vf", "crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920",
+
+            "-preset", "ultrafast",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+
             clip_path,
             "-y"
         ]
