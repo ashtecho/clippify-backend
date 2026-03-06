@@ -15,7 +15,7 @@ from faster_whisper import WhisperModel
 # CONFIG
 # -------------------------
 
-SECRET_KEY = "clippify_secret"
+SECRET_KEY = "clippify_super_secure_secret_key_20072009"
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
 
