@@ -8,3 +8,4 @@ faster-whisper
 pydantic
 email-validator
 ffmpeg-python
+faster-whisper
