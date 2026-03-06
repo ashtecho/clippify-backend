@@ -1,7 +1,6 @@
 import os
 import time
 import subprocess
-from typing import List
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -11,6 +10,7 @@ from pydantic import BaseModel
 
 import jwt
 import yt_dlp
+import whisper
 
 
 # -------------------------
@@ -23,10 +23,14 @@ ALGORITHM = "HS256"
 DOWNLOAD_DIR = "downloads"
 AUDIO_DIR = "audio"
 CLIPS_DIR = "clips"
+SUB_DIR = "subs"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CLIPS_DIR, exist_ok=True)
+os.makedirs(SUB_DIR, exist_ok=True)
+
+model = whisper.load_model("base")
 
 
 # -------------------------
@@ -35,7 +39,6 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
 
 app = FastAPI(title="Clippify API")
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,7 +47,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve clips publicly
 app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 
 
@@ -73,9 +75,7 @@ def create_token(email: str):
         "exp": int(time.time()) + 86400
     }
 
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-    return token
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -91,7 +91,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 
 # -------------------------
-# BASIC ROUTES
+# ROUTES
 # -------------------------
 
 @app.get("/")
@@ -105,14 +105,14 @@ def health():
 
 
 # -------------------------
-# AUTH ROUTES
+# AUTH
 # -------------------------
 
 @app.post("/signup")
 def signup(user: User):
 
     if user.email in users_db:
-        raise HTTPException(status_code=400, detail="User already exists")
+        raise HTTPException(status_code=400, detail="User exists")
 
     users_db[user.email] = user.password
 
@@ -131,17 +131,7 @@ def login(user: User):
 
 
 # -------------------------
-# DASHBOARD
-# -------------------------
-
-@app.get("/dashboard")
-def dashboard(email: str = Depends(verify_token)):
-
-    return {"message": f"Welcome {email}"}
-
-
-# -------------------------
-# DOWNLOAD YOUTUBE VIDEO
+# DOWNLOAD VIDEO
 # -------------------------
 
 def download_youtube(url: str):
@@ -183,10 +173,45 @@ def extract_audio(video_path: str):
 
 
 # -------------------------
-# GENERATE VERTICAL SHORTS
+# TRANSCRIBE AUDIO
 # -------------------------
 
-def generate_clips(video_path: str):
+def generate_subtitles(audio_path):
+
+    result = model.transcribe(audio_path)
+
+    srt_path = f"{SUB_DIR}/{os.path.basename(audio_path)}.srt"
+
+    with open(srt_path, "w") as f:
+
+        for i, seg in enumerate(result["segments"], start=1):
+
+            start = seg["start"]
+            end = seg["end"]
+            text = seg["text"]
+
+            f.write(f"{i}\n")
+            f.write(f"{format_time(start)} --> {format_time(end)}\n")
+            f.write(f"{text}\n\n")
+
+    return srt_path
+
+
+def format_time(seconds):
+
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+
+    return f"{hrs:02}:{mins:02}:{secs:02},{ms:03}"
+
+
+# -------------------------
+# GENERATE CLIPS
+# -------------------------
+
+def generate_clips(video_path: str, subtitle_path: str):
 
     clips = []
 
@@ -205,8 +230,8 @@ def generate_clips(video_path: str):
             "-t", str(clip_length),
             "-i", video_path,
 
-            # convert horizontal video to vertical
-            "-vf", "crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920",
+            "-vf",
+            f"crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920,subtitles={subtitle_path}",
 
             "-preset", "ultrafast",
             "-c:v", "libx264",
@@ -232,9 +257,11 @@ def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
 
     video = download_youtube(req.url)
 
-    extract_audio(video)
+    audio = extract_audio(video)
 
-    clips = generate_clips(video)
+    subs = generate_subtitles(audio)
+
+    clips = generate_clips(video, subs)
 
     return {
         "message": "Processing completed",
