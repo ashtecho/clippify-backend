@@ -1,13 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends  
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials  
-from pydantic import BaseModel, EmailStr  
-import bcrypt  
-import jwt  
-import json  
-import os  
-from datetime import datetime, timedelta  
-import ffmpeg  
-from faster_whisper import WhisperModel  
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+import bcrypt
+import jwt
+import json
+import os
+import requests
+from datetime import datetime, timedelta
+import ffmpeg
+from faster_whisper import WhisperModel
 
 app = FastAPI(title="Clippify API")
 
@@ -15,10 +16,8 @@ app = FastAPI(title="Clippify API")
 # CONFIG
 # =========================
 
-SECRET_KEY = "clippify-secret-key"  
-ALGORITHM = "HS256"  
-
-MAX_VIDEO_SIZE = 4 * 1024 * 1024 * 1024  # 4GB  
+SECRET_KEY = "clippify-secret-key"
+ALGORITHM = "HS256"
 
 security = HTTPBearer()
 
@@ -32,17 +31,20 @@ whisper_model = WhisperModel("base", compute_type="int8")
 # CREATE FOLDERS
 # =========================
 
-os.makedirs("uploads", exist_ok=True)  
-os.makedirs("audio", exist_ok=True)  
+os.makedirs("videos", exist_ok=True)
+os.makedirs("audio", exist_ok=True)
 os.makedirs("clips", exist_ok=True)
 
 # =========================
 # USER MODEL
 # =========================
 
-class User(BaseModel):  
-    email: EmailStr  
+class User(BaseModel):
+    email: EmailStr
     password: str
+
+class VideoURL(BaseModel):
+    video_url: str
 
 # =========================
 # USER STORAGE
@@ -50,59 +52,80 @@ class User(BaseModel):
 
 USERS_FILE = "users.json"
 
-def load_users():  
-    if not os.path.exists(USERS_FILE):  
-        with open(USERS_FILE, "w") as f:  
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w") as f:
             json.dump([], f)
 
-    with open(USERS_FILE, "r") as f:  
+    with open(USERS_FILE, "r") as f:
         return json.load(f)
 
-def save_users(users):  
-    with open(USERS_FILE, "w") as f:  
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
         json.dump(users, f)
 
 # =========================
 # TOKEN SYSTEM
 # =========================
 
-def create_token(email: str):  
-    payload = {  
-        "email": email,  
-        "exp": datetime.utcnow() + timedelta(hours=24)  
-    }  
+def create_token(email: str):
+
+    payload = {
+        "email": email,
+        "exp": datetime.utcnow() + timedelta(hours=24)
+    }
+
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):  
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+
     token = credentials.credentials
 
-    try:  
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])  
-        return payload  
-    except:  
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+
+    except:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # =========================
-# AUDIO EXTRACTION
+# DOWNLOAD VIDEO
+# =========================
+
+def download_video(url):
+
+    filename = url.split("/")[-1]
+    video_path = f"videos/{filename}"
+
+    r = requests.get(url, stream=True)
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to download video")
+
+    with open(video_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+
+    return video_path
+
+# =========================
+# EXTRACT AUDIO
 # =========================
 
 def extract_audio(video_path):
 
-    filename = os.path.basename(video_path)  
+    filename = os.path.basename(video_path)
     audio_path = f"audio/{filename}.wav"
 
-    try:  
-        (  
-            ffmpeg  
-            .input(video_path)  
-            .output(audio_path, ac=1, ar="16000")  
-            .run(overwrite_output=True)  
-        )
+    (
+        ffmpeg
+        .input(video_path)
+        .output(audio_path, ac=1, ar="16000")
+        .run(overwrite_output=True)
+    )
 
-        return audio_path
-
-    except Exception as e:  
-        raise HTTPException(status_code=500, detail=str(e))
+    return audio_path
 
 # =========================
 # WHISPER TRANSCRIPTION
@@ -127,25 +150,25 @@ def transcribe_audio(audio_path):
 # ROUTES
 # =========================
 
-@app.get("/")  
-def home():  
-    return {"message": "Welcome to Clippify backend", "docs": "/docs"}
+@app.get("/")
+def home():
+    return {"message": "Clippify backend running", "docs": "/docs"}
 
-@app.get("/health")  
-def health():  
+@app.get("/health")
+def health():
     return {"status": "healthy"}
 
 # =========================
 # SIGNUP
 # =========================
 
-@app.post("/signup")  
+@app.post("/signup")
 def signup(user: User):
 
     users = load_users()
 
-    for u in users:  
-        if u["email"] == user.email:  
+    for u in users:
+        if u["email"] == user.email:
             raise HTTPException(status_code=400, detail="User already exists")
 
     hashed = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt())
@@ -163,7 +186,7 @@ def signup(user: User):
 # LOGIN
 # =========================
 
-@app.post("/login")  
+@app.post("/login")
 def login(user: User):
 
     users = load_users()
@@ -190,7 +213,7 @@ def login(user: User):
 # DASHBOARD
 # =========================
 
-@app.get("/dashboard")  
+@app.get("/dashboard")
 def dashboard(payload = Depends(verify_token)):
 
     return {
@@ -199,52 +222,22 @@ def dashboard(payload = Depends(verify_token)):
     }
 
 # =========================
-# VIDEO UPLOAD + AI PROCESS
+# PROCESS VIDEO FROM URL
 # =========================
 
-@app.post("/upload-video")  
-async def upload_video(
-    file: UploadFile = File(...),
-    payload = Depends(verify_token)
-):
+@app.post("/process-video-url")
+def process_video(video: VideoURL, payload = Depends(verify_token)):
 
-    allowed = [".mp4", ".mov", ".mkv"]
+    video_path = download_video(video.video_url)
 
-    if not any(file.filename.endswith(ext) for ext in allowed):
-        raise HTTPException(status_code=400, detail="Unsupported video format")
+    audio_file = extract_audio(video_path)
 
-    filepath = f"uploads/{file.filename}"
-
-    size = 0
-
-    with open(filepath, "wb") as buffer:
-
-        while True:
-
-            chunk = await file.read(1024 * 1024)
-
-            if not chunk:
-                break
-
-            size += len(chunk)
-
-            if size > MAX_VIDEO_SIZE:
-                buffer.close()
-                os.remove(filepath)
-                raise HTTPException(status_code=400, detail="File exceeds 4GB limit")
-
-            buffer.write(chunk)
-
-    # Extract audio
-    audio_file = extract_audio(filepath)
-
-    # Whisper transcription
     transcript = transcribe_audio(audio_file)
 
     return {
-        "message": "Upload successful. Processing started.",
-        "video_saved": filepath,
-        "audio_output": audio_file,
-        "transcript_preview": transcript[:10],
-        "segments_detected": len(transcript)
+        "message": "Video processed successfully",
+        "video_saved": video_path,
+        "audio_file": audio_file,
+        "segments_detected": len(transcript),
+        "transcript_preview": transcript[:10]
     }
