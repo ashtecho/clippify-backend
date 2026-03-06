@@ -26,8 +26,8 @@ class User(BaseModel):
     email: EmailStr
     password: str
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security):
 
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
 
     try:
@@ -35,7 +35,6 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security):
         return payload
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
-
 @app.get("/")
 def home():
     return {"message": "Welcome to Clippify backend", "docs": "/docs"}
