@@ -143,7 +143,7 @@ def extract_audio(video_path: str):
         "-y"
     ]
 
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=120)
 
     return audio_path
 
@@ -158,7 +158,7 @@ def generate_clips(video_path: str):
     clip_length = 35
     start = 0
 
-    for i in range(5):
+    for i in range(3):
 
         clip_path = f"{CLIPS_DIR}/clip_{int(time.time())}_{i}.mp4"
 
@@ -167,15 +167,24 @@ def generate_clips(video_path: str):
             "-ss", str(start),
             "-t", str(clip_length),
             "-i", video_path,
+
             "-vf",
-            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+            "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280",
+
+            "-preset", "ultrafast",
+            "-threads", "2",
+
             "-c:v", "libx264",
+            "-crf", "28",
+
             "-c:a", "aac",
+            "-b:a", "96k",
+
             clip_path,
             "-y"
         ]
 
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=180)
 
         clips.append(clip_path)
 
@@ -210,7 +219,6 @@ def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
         }
 
     except Exception as e:
-
         raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------------
