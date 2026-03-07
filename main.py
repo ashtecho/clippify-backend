@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 import jwt
 import yt_dlp
-import whisper
+from faster_whisper import WhisperModel
 
 
 # -------------------------
@@ -30,7 +30,8 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CLIPS_DIR, exist_ok=True)
 os.makedirs(SUB_DIR, exist_ok=True)
 
-model = whisper.load_model("base")
+# lightweight whisper model
+model = WhisperModel("tiny", compute_type="int8")
 
 
 # -------------------------
@@ -99,15 +100,6 @@ def home():
     return {"message": "Clippify backend running"}
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-# -------------------------
-# AUTH
-# -------------------------
-
 @app.post("/signup")
 def signup(user: User):
 
@@ -131,7 +123,7 @@ def login(user: User):
 
 
 # -------------------------
-# DOWNLOAD VIDEO
+# DOWNLOAD YOUTUBE
 # -------------------------
 
 def download_youtube(url: str):
@@ -153,48 +145,48 @@ def download_youtube(url: str):
 # EXTRACT AUDIO
 # -------------------------
 
-def extract_audio(video_path: str):
+def extract_audio(video):
 
-    audio_path = f"{AUDIO_DIR}/{os.path.basename(video_path)}.wav"
+    audio = f"{AUDIO_DIR}/{os.path.basename(video)}.wav"
 
     cmd = [
         "ffmpeg",
-        "-i", video_path,
+        "-i", video,
         "-ar", "16000",
         "-ac", "1",
         "-vn",
-        audio_path,
+        audio,
         "-y"
     ]
 
     subprocess.run(cmd)
 
-    return audio_path
+    return audio
 
 
 # -------------------------
-# TRANSCRIBE AUDIO
+# CAPTION GENERATION
 # -------------------------
 
-def generate_subtitles(audio_path):
+def generate_subtitles(audio):
 
-    result = model.transcribe(audio_path)
+    segments, info = model.transcribe(audio)
 
-    srt_path = f"{SUB_DIR}/{os.path.basename(audio_path)}.srt"
+    srt = f"{SUB_DIR}/{os.path.basename(audio)}.srt"
 
-    with open(srt_path, "w") as f:
+    with open(srt, "w") as f:
 
-        for i, seg in enumerate(result["segments"], start=1):
+        for i, seg in enumerate(segments, start=1):
 
-            start = seg["start"]
-            end = seg["end"]
-            text = seg["text"]
+            start = seg.start
+            end = seg.end
+            text = seg.text
 
             f.write(f"{i}\n")
             f.write(f"{format_time(start)} --> {format_time(end)}\n")
             f.write(f"{text}\n\n")
 
-    return srt_path
+    return srt
 
 
 def format_time(seconds):
@@ -208,10 +200,10 @@ def format_time(seconds):
 
 
 # -------------------------
-# GENERATE CLIPS
+# GENERATE SHORTS
 # -------------------------
 
-def generate_clips(video_path: str, subtitle_path: str):
+def generate_clips(video, subs):
 
     clips = []
 
@@ -222,22 +214,19 @@ def generate_clips(video_path: str, subtitle_path: str):
 
         start = i * clip_length
 
-        clip_path = f"{CLIPS_DIR}/clip_{i}.mp4"
+        clip = f"{CLIPS_DIR}/clip_{i}.mp4"
 
         cmd = [
             "ffmpeg",
             "-ss", str(start),
             "-t", str(clip_length),
-            "-i", video_path,
-
+            "-i", video,
             "-vf",
-            f"crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920,subtitles={subtitle_path}",
-
+            f"crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920,subtitles={subs}",
             "-preset", "ultrafast",
             "-c:v", "libx264",
             "-c:a", "aac",
-
-            clip_path,
+            clip,
             "-y"
         ]
 
@@ -249,11 +238,11 @@ def generate_clips(video_path: str, subtitle_path: str):
 
 
 # -------------------------
-# PROCESS YOUTUBE
+# MAIN PROCESS
 # -------------------------
 
 @app.post("/process-youtube")
-def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
+def process(req: YoutubeRequest, email: str = Depends(verify_token)):
 
     video = download_youtube(req.url)
 
@@ -267,21 +256,3 @@ def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
         "message": "Processing completed",
         "clips": clips
     }
-
-
-# -------------------------
-# LIST CLIPS
-# -------------------------
-
-@app.get("/clips")
-def list_clips():
-
-    files = os.listdir(CLIPS_DIR)
-
-    clips = [
-        f"/clips/{f}"
-        for f in files
-        if f.endswith(".mp4")
-    ]
-
-    return {"clips": clips}
