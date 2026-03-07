@@ -1,38 +1,30 @@
 import os
 import time
 import subprocess
+from typing import List
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
 import jwt
 import yt_dlp
-from faster_whisper import WhisperModel
-
 
 # -------------------------
 # CONFIG
 # -------------------------
 
-SECRET_KEY = "clippify_secret_key"
+SECRET_KEY = "clippify_super_secure_secret_key_2026_ai_video_platform"
 ALGORITHM = "HS256"
 
 DOWNLOAD_DIR = "downloads"
 AUDIO_DIR = "audio"
 CLIPS_DIR = "clips"
-SUB_DIR = "subs"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(CLIPS_DIR, exist_ok=True)
-os.makedirs(SUB_DIR, exist_ok=True)
-
-# lightweight whisper model
-model = WhisperModel("tiny", compute_type="int8")
-
 
 # -------------------------
 # APP
@@ -50,46 +42,32 @@ app.add_middleware(
 
 app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 
-
 # -------------------------
 # AUTH
 # -------------------------
 
 security = HTTPBearer()
-
 users_db = {}
-
 
 class User(BaseModel):
     email: str
     password: str
 
-
 class YoutubeRequest(BaseModel):
     url: str
 
-
 def create_token(email: str):
-
-    payload = {
-        "email": email,
-        "exp": int(time.time()) + 86400
-    }
-
+    payload = {"email": email, "exp": int(time.time()) + 86400}
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-
     token = credentials.credentials
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload["email"]
-
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
-
 
 # -------------------------
 # ROUTES
@@ -99,17 +77,23 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 def home():
     return {"message": "Clippify backend running"}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+# -------------------------
+# AUTH ROUTES
+# -------------------------
 
 @app.post("/signup")
 def signup(user: User):
 
     if user.email in users_db:
-        raise HTTPException(status_code=400, detail="User exists")
+        raise HTTPException(status_code=400, detail="User already exists")
 
     users_db[user.email] = user.password
 
     return {"message": "Signup successful"}
-
 
 @app.post("/login")
 def login(user: User):
@@ -121,18 +105,19 @@ def login(user: User):
 
     return {"access_token": token}
 
-
 # -------------------------
-# DOWNLOAD YOUTUBE
+# YOUTUBE DOWNLOAD
 # -------------------------
 
 def download_youtube(url: str):
 
-    filename = f"{DOWNLOAD_DIR}/video_{int(time.time())}.mp4"
+    filename = f"{DOWNLOAD_DIR}/video_{int(time.time()*1000)}.mp4"
 
     ydl_opts = {
-        "format": "mp4",
-        "outtmpl": filename
+        "format": "best[ext=mp4]/best",
+        "outtmpl": filename,
+        "noplaylist": True,
+        "quiet": True
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -140,119 +125,107 @@ def download_youtube(url: str):
 
     return filename
 
-
 # -------------------------
-# EXTRACT AUDIO
+# AUDIO EXTRACTION
 # -------------------------
 
-def extract_audio(video):
+def extract_audio(video_path: str):
 
-    audio = f"{AUDIO_DIR}/{os.path.basename(video)}.wav"
+    audio_path = f"{AUDIO_DIR}/{os.path.basename(video_path)}.wav"
 
     cmd = [
         "ffmpeg",
-        "-i", video,
+        "-i", video_path,
         "-ar", "16000",
         "-ac", "1",
         "-vn",
-        audio,
+        audio_path,
         "-y"
     ]
 
-    subprocess.run(cmd)
+    subprocess.run(cmd, check=True)
 
-    return audio
-
-
-# -------------------------
-# CAPTION GENERATION
-# -------------------------
-
-def generate_subtitles(audio):
-
-    segments, info = model.transcribe(audio)
-
-    srt = f"{SUB_DIR}/{os.path.basename(audio)}.srt"
-
-    with open(srt, "w") as f:
-
-        for i, seg in enumerate(segments, start=1):
-
-            start = seg.start
-            end = seg.end
-            text = seg.text
-
-            f.write(f"{i}\n")
-            f.write(f"{format_time(start)} --> {format_time(end)}\n")
-            f.write(f"{text}\n\n")
-
-    return srt
-
-
-def format_time(seconds):
-
-    hrs = int(seconds // 3600)
-    mins = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-
-    return f"{hrs:02}:{mins:02}:{secs:02},{ms:03}"
-
+    return audio_path
 
 # -------------------------
-# GENERATE SHORTS
+# CLIP GENERATION
 # -------------------------
 
-def generate_clips(video, subs):
+def generate_clips(video_path: str):
 
     clips = []
 
     clip_length = 35
-    max_clips = 5
+    start = 0
 
-    for i in range(max_clips):
+    for i in range(5):
 
-        start = i * clip_length
-
-        clip = f"{CLIPS_DIR}/clip_{i}.mp4"
+        clip_path = f"{CLIPS_DIR}/clip_{int(time.time())}_{i}.mp4"
 
         cmd = [
             "ffmpeg",
             "-ss", str(start),
             "-t", str(clip_length),
-            "-i", video,
+            "-i", video_path,
             "-vf",
-            f"crop=in_h*9/16:in_h:(in_w-in_h*9/16)/2:0,scale=1080:1920,subtitles={subs}",
-            "-preset", "ultrafast",
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
             "-c:v", "libx264",
             "-c:a", "aac",
-            clip,
+            clip_path,
             "-y"
         ]
 
-        subprocess.run(cmd)
+        subprocess.run(cmd, check=True)
 
-        clips.append(f"/clips/clip_{i}.mp4")
+        clips.append(clip_path)
+
+        start += clip_length
 
     return clips
 
-
 # -------------------------
-# MAIN PROCESS
+# PROCESS VIDEO
 # -------------------------
 
 @app.post("/process-youtube")
-def process(req: YoutubeRequest, email: str = Depends(verify_token)):
+def process_youtube(req: YoutubeRequest, email: str = Depends(verify_token)):
 
-    video = download_youtube(req.url)
+    try:
 
-    audio = extract_audio(video)
+        video = download_youtube(req.url)
 
-    subs = generate_subtitles(audio)
+        audio = extract_audio(video)
 
-    clips = generate_clips(video, subs)
+        clips = generate_clips(video)
 
-    return {
-        "message": "Processing completed",
-        "clips": clips
-    }
+        public_clips = []
+
+        for clip in clips:
+            name = os.path.basename(clip)
+            public_clips.append(f"/clips/{name}")
+
+        return {
+            "message": "Processing completed",
+            "clips": public_clips
+        }
+
+    except Exception as e:
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -------------------------
+# LIST CLIPS
+# -------------------------
+
+@app.get("/clips")
+def list_clips():
+
+    files = os.listdir(CLIPS_DIR)
+
+    clips = [
+        f"/clips/{f}"
+        for f in files
+        if f.endswith(".mp4")
+    ]
+
+    return {"clips": clips}
