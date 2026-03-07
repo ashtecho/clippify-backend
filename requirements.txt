@@ -8,4 +8,4 @@ faster-whisper
 pydantic
 email-validator
 yt-dlp
-openai-whisper
+numpy
